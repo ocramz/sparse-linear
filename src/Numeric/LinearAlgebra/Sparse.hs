@@ -1,10 +1,12 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeFamilies #-}
 
 module Numeric.LinearAlgebra.Sparse where
 
-import Control.Monad.ST (ST)
+import Control.Monad (when)
+import Control.Monad.ST (ST, runST)
 import Data.Function (fix)
 import Data.Ord (comparing)
 import qualified Data.Vector.Algorithms.Intro as Intro
@@ -23,6 +25,10 @@ data Matrix (or :: Orient) a = Matrix
     , minors :: !(Vector Int) -- length == nz; all (< nminor)
     , entries :: !(Vector a) -- length == nz
     }
+
+nnz :: Unbox a => Matrix or a -> Int
+nnz = V.length . entries
+{-# INLINE nnz #-}
 
 class OrientOf or where
     orientOf :: Matrix or a -> Orient
@@ -151,3 +157,71 @@ fromDiag = \entries ->
         minors = V.enumFromN 0 nminor
     in Matrix{..}
 {-# INLINE fromDiag #-}
+
+scale :: (Num a, Unbox a) => a -> Matrix or a -> Matrix or a
+scale = \sc mat -> mat { entries = V.map (* sc) $ entries mat }
+{-# INLINE scale #-}
+
+add :: (Num a, Unbox a) => Matrix or a -> Matrix or a -> Matrix or a
+add matA matB
+  | nmajor matA /= nmajor matB =
+      errorWithStackTrace "matrix major dimensions do not agree"
+  | nminor matA /= nminor matB =
+      errorWithStackTrace "matrix minor dimensions do not agree"
+  | nmajor matA <= 0 =
+      errorWithStackTrace "matrix major dimension must be positive"
+  | nminor matA <= 0 =
+      errorWithStackTrace "matrix minor dimension must be positive"
+  | otherwise = runST $ do
+      let ixls = minors matA
+          xls = entries matA
+          ixrs = minors matB
+          xrs = entries matB
+          next (j, _, ia, iaEnd, ib, ibEnd, _) =
+              let ixl = ixls V.! ia
+                  ixr = ixrs V.! ib
+                  xl = xls V.! ia
+                  xr = xrs V.! ib
+                  (ia', ib', entry) = case compare ixl ixr of
+                    EQ -> (ia + 1, ib + 1, (ixl, xl + xr))
+                    LT -> (ia + 1, ib, (ixl, xl))
+                    GT -> (ia, ib + 1, (ixr, xr))
+              in case (ia < iaEnd, ib < ibEnd) of
+                (True, True) ->
+                    Just (j, False, ia', iaEnd, ib', ibEnd, entry)
+                (False, True) ->
+                    Just (j, False, ia, iaEnd, ib + 1, ibEnd, (ixr, xr))
+                (True, False) ->
+                    Just (j, False, ia + 1, iaEnd, ib, ibEnd, (ixl, xl))
+                (False, False) ->
+                    let j' = j + 1
+                        iaEnd' = (majors matA) V.! (j' + 1)
+                        ibEnd' = (majors matB) V.! (j' + 1)
+                    in if j' < nmajor matA
+                      then Just (j', True, ia', iaEnd', ib', ibEnd', entry)
+                      else Nothing
+          nnzUB = nnz matA + nnz matB
+          nmajor_ = nmajor matA
+          nminor_ = nminor matA
+      majors__ <- MV.new (nmajor_ + 1)
+      minors__ <- MV.new nnzUB
+      entries__ <- MV.new nnzUB
+      let loop ix = \case
+            Nothing -> return ix
+            Just it@(j, wj, _, _, _, _, (mnr, x)) ->  do
+                when wj $ MV.write majors__ j ix
+                MV.write minors__ ix mnr
+                MV.write entries__ ix x
+                loop (ix + 1) (next it)
+      nnz_ <- loop 0 $ next (-1, True, -1, -1, -1, -1, (0, 0))
+      MV.write majors__ nmajor_ nnz_
+      majors_ <- V.unsafeFreeze majors__
+      minors_ <- V.unsafeFreeze $ MV.slice 0 nnz_ minors__
+      entries_ <- V.unsafeFreeze $ MV.slice 0 nnz_ entries__
+      return $ Matrix
+          { nmajor = nmajor_
+          , nminor = nminor_
+          , majors = majors_
+          , minors = minors_
+          , entries = entries_
+          }
