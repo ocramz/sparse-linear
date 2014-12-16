@@ -100,3 +100,13 @@ mulV = \mat xs ->
               MV.write ys r $ ax + y
           return ys
 {-# INLINE mulV #-}
+
+fromDiag
+  :: (Unbox a)
+  => Vector a
+  -> Matrix or a
+fromDiag = \xs ->
+    let dim_ = V.length xs
+        pairs = V.indexed xs
+    in Matrix dim_ (V.enumFromN 0 $ dim_ + 1) pairs
+{-# INLINE fromDiag #-}
