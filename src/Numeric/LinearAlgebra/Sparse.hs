@@ -4,11 +4,13 @@
 
 module Numeric.LinearAlgebra.Sparse where
 
+import Control.Monad.ST (ST)
 import Data.Function (fix)
 import Data.Ord (comparing)
 import qualified Data.Vector.Algorithms.Intro as Intro
 import Data.Vector.Unboxed (Unbox, Vector)
 import qualified Data.Vector.Unboxed as V
+import Data.Vector.Unboxed.Mutable (STVector)
 import qualified Data.Vector.Unboxed.Mutable as MV
 import GHC.Stack (errorWithStackTrace)
 
@@ -33,8 +35,27 @@ instance OrientOf Col where
     orientOf = \_ -> Col
     {-# INLINE orientOf #-}
 
+dedup :: (Num a, Unbox a) => STVector s (Int, Int, a) -> ST s ()
+dedup v = do
+    let len = MV.length v
+        loop prevR prevC prevA prevN nextN
+          | nextN < len = do
+              (r, c, a) <- MV.read v nextN
+              if r == prevR && c == prevC
+                then loop r c (a + prevA) prevN (nextN + 1)
+                else do
+                    MV.write v prevN (prevR, prevC, prevA)
+                    loop r c a (prevN + 1) (nextN + 1)
+          | otherwise = return ()
+    if len > 0
+      then do
+          (r0, c0, a0) <- MV.read v 0
+          loop r0 c0 a0 0 1
+      else return ()
+{-# INLINE dedup #-}
+
 compress
-  :: (OrientOf or, Unbox a)
+  :: (OrientOf or, Num a, Unbox a)
   => Int
   -> Int
   -> Vector (Int, Int, a)
@@ -47,7 +68,7 @@ compress = \nr nc coords -> fix $ \compressed ->
         comparison = case orient of
           Row -> comparing $ \(r, c, _) -> (r, c)
           Col -> comparing $ \(r, c, _) -> (c, r)
-        sorted = V.modify (Intro.sortBy comparison) coords
+        sorted = V.modify (\v -> do { Intro.sortBy comparison v; dedup v }) coords
         (rows, cols, entries) = V.unzip3 sorted
 
         minors = case orient of { Row -> cols; Col -> rows }
